@@ -1,86 +1,109 @@
-const recordButton = document.getElementById('record');
-const stopButton = document.getElementById('stop');
-const audioElement = document.getElementById('audio');
-const timerDisplay = document.getElementById('timer');
+document.addEventListener("DOMContentLoaded", function () {
+  const recordButton = document.getElementById('record');
+  const stopButton = document.getElementById('stop');
+  const transcriptionDiv = document.getElementById('transcription');
+  const sentimentDiv = document.getElementById('sentiment');
+  const recordedFilesList = document.getElementById('recordedFiles');
+  const ttsFilesList = document.getElementById('ttsFiles');
+  let mediaRecorder;
+  let audioChunks = [];
 
-let mediaRecorder;
-let audioChunks = [];
-let startTime;
-let timerInterval;
+  recordButton.addEventListener('click', () => {
+      navigator.mediaDevices.getUserMedia({ audio: true })
+          .then(stream => {
+              mediaRecorder = new MediaRecorder(stream);
+              mediaRecorder.start();
+              audioChunks = [];
 
-function formatTime(time) {
-  const minutes = Math.floor(time / 60);
-  const seconds = Math.floor(time % 60);
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-}
+              mediaRecorder.ondataavailable = event => {
+                  audioChunks.push(event.data);
+              };
 
-recordButton.addEventListener('click', () => {
-  navigator.mediaDevices.getUserMedia({ audio: true })
-    .then(stream => {
-      mediaRecorder = new MediaRecorder(stream);
-      mediaRecorder.start();
+              mediaRecorder.onstop = () => {
+                  const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                  const formData = new FormData();
+                  formData.append('audio_data', audioBlob, 'recorded_audio.wav');
 
-      startTime = Date.now();
-      timerInterval = setInterval(() => {
-        const elapsedTime = Math.floor((Date.now() - startTime) / 1000);
-        timerDisplay.textContent = formatTime(elapsedTime);
-      }, 1000);
+                  fetch('/upload', {
+                      method: 'POST',
+                      body: formData
+                  })
+                  .then(response => response.json())
+                  .then(data => {
+                      if (data.transcript) {
+                          transcriptionDiv.innerHTML = `<strong>Transcription:</strong> ${data.transcript}`;
+                          sentimentDiv.innerHTML = `<strong>Sentiment:</strong> ${data.sentiment_label} (Score: ${data.sentiment_score}, Magnitude: ${data.sentiment_magnitude})`;
+                      }
 
-      mediaRecorder.ondataavailable = e => {
-        audioChunks.push(e.data);
-      };
+                      if (data.audio_url) {
+                          const listItem = document.createElement('li');
+                          listItem.innerHTML = `
+                              <audio controls>
+                                  <source src="${data.audio_url}" type="audio/wav">
+                                  Your browser does not support the audio element.
+                              </audio><br>
+                              <a href="${data.audio_url}">Download ${data.audio_url.split('/').pop()}</a>
+                          `;
+                          recordedFilesList.appendChild(listItem);
+                      }
+                  })
+                  .catch(error => {
+                      console.error("Error uploading audio:", error);
+                  });
+              };
+          })
+          .catch(error => {
+              console.error("Microphone access denied:", error);
+          });
 
-      mediaRecorder.onstop = () => {
-        clearInterval(timerInterval); // Clear timer
-        timerDisplay.textContent = "00:00"; // Reset timer display
+      recordButton.disabled = true;
+      stopButton.disabled = false;
+  });
 
-        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-        const audioUrl = URL.createObjectURL(audioBlob); // Create playback URL
-        audioElement.src = audioUrl; // Set audio source
-        audioElement.controls = true; // Enable playback controls
+  stopButton.addEventListener('click', () => {
+      if (mediaRecorder) {
+          mediaRecorder.stop();
+      }
+      recordButton.disabled = false;
+      stopButton.disabled = true;
+  });
 
-        const formData = new FormData();
-        formData.append('audio_data', audioBlob, 'recorded_audio.wav');
+  const textInput = document.getElementById('textInput');
+  const textSubmit = document.getElementById('textSubmit');
+  const ttsAudio = document.createElement("audio");
+  document.body.appendChild(ttsAudio);
 
-        fetch('/upload', {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('Network response was not ok');
-            }
-            location.reload(); // Force refresh
+  textSubmit.addEventListener('click', () => {
+      fetch('/upload_text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ text: textInput.value })
+      })
+      .then(response => response.json())
+      .then(data => {
+          if (data.tts_url) {
+              ttsAudio.src = data.tts_url;
+              ttsAudio.controls = true;
+              ttsAudio.play();
 
-            return response.text();
-        })
-        .then(data => {
-            console.log('Audio uploaded successfully:', data);
-        })
-        .catch(error => {
-            console.error('Error uploading audio:', error);
-            alert('Failed to upload audio. Please try again.');
-        });
-      };
-    })
-    .catch(error => {
-      console.error('Error accessing microphone:', error);
-      alert('Please allow microphone access to use this feature.');
-    });
-
-  recordButton.disabled = true;
-  stopButton.disabled = false;
+              const listItem = document.createElement('li');
+              listItem.innerHTML = `
+                  <audio controls>
+                      <source src="${data.tts_url}" type="audio/wav">
+                      Your browser does not support the audio element.
+                  </audio><br>
+                  <a href="${data.tts_url}">Download ${data.tts_url.split('/').pop()}</a>
+              `;
+              ttsFilesList.appendChild(listItem);
+          } else {
+              alert("Failed to generate TTS audio.");
+          }
+      })
+      .catch(error => {
+          console.error("Error generating speech:", error);
+          alert("Failed to generate speech.");
+      });
+  });
 });
 
-stopButton.addEventListener('click', () => {
-  if (mediaRecorder) {
-    mediaRecorder.stop();
-    audioChunks = []; // Reset chunks for the next recording
-  }
 
-  recordButton.disabled = false;
-  stopButton.disabled = true;
-});
-
-// Initially disable the stop button
-stopButton.disabled = true;

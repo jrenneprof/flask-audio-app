@@ -1,57 +1,113 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-    <title>Audio Recorder</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Recorder & TTS</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 20px;
+        }
+        table {
+            width: 100%;
+            margin-top: 20px;
+        }
+        td {
+            width: 50%;
+            vertical-align: top;
+            padding: 20px;
+        }
+        button {
+            padding: 10px;
+            margin: 10px;
+            cursor: pointer;
+        }
+        textarea {
+            width: 90%;
+        }
+        ul {
+            list-style: none;
+            padding: 0;
+        }
+        li {
+            margin-bottom: 10px;
+        }
+        .result-box {
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin-top: 10px;
+            background: #f9f9f9;
+        }
+    </style>
 </head>
 <body>
-    <table style="width:100%">
-        <tr>
-            <td style="width:50%">
-                <h2>Record and Upload Audio</h2>
 
-                <button id="record">Record</button>
-                <button id="stop">Stop</button>
+    <h1>Audio Recorder & Text-to-Speech</h1>
+
+    <table>
+        <tr>
+            <td>
+                <h2>Record and Upload Audio</h2>
+                <button id="record">🎤 Start Recording</button>
+                <button id="stop" disabled>⏹️ Stop</button>
                 <span id="timer">00:00</span>
                 <audio id="audio" controls></audio>
 
+                <h2>Transcription & Sentiment Analysis</h2>
+                <div class="result-box">
+                    <strong>Transcription:</strong>
+                    <p id="transcription">Transcription will appear here...</p>
+                </div>
+                <div class="result-box">
+                    <strong>Sentiment Analysis:</strong>
+                    <p id="sentiment">Sentiment analysis will appear here...</p>
+                </div>
+
                 <h2>Recorded Files</h2>
-                <ul>
+                <ul id="recordedFiles">
                     {% for file in audio_files %}
-                    <li> 
+                    {% if ".wav" in file %}
+                    <li>
                         <audio controls>
                             <source src="{{ url_for('uploaded_file', filename=file) }}">
                             Your browser does not support the audio element.
                         </audio><br>
-                        {{ file }}
-                        <a href="uploads/{{ file }}.txt">{{ file }}.txt</a>
+                        <a href="{{ url_for('uploaded_file', filename=file) }}">{{ file }}</a>
                     </li>
+                    {% endif %}
                     {% endfor %}
                 </ul>
             </td>
-            <td style="width:50%">
-                <h2>Type in Your Text to Generate Audio</h2>
 
-                <form action="/upload_text" method="post">
-                  <textarea name="text" rows="10" cols="50"></textarea>
-                  <br>
-                  <input type="submit" value="Upload">
-                </form>
+            <td>
+                <h2>Type in Your Text to Generate Audio</h2>
+                <textarea id="textInput" rows="4" placeholder="Enter text here..."></textarea>
+                <br>
+                <button id="textSubmit">🎙️ Convert to Speech</button>
 
                 <h2>TTS Generated Files</h2>
-                <ul>
+                <ul id="ttsFiles">
                     {% for file in tts_files %}
-                    <li> 
+                    {% if ".wav" in file %}
+                    <li>
                         <audio controls>
                             <source src="{{ url_for('tts_file', filename=file) }}">
                             Your browser does not support the audio element.
                         </audio><br>
-                        {{ file }}
-                        <a href="tts/{{ file }}.txt">{{ file }}.txt</a>
+                        <a href="{{ url_for('tts_file', filename=file) }}">{{ file }}</a>
                     </li>
+                    {% endif %}
                     {% endfor %}
                 </ul>
             </td>
         </tr>
     </table>
+
     <script src="script.js"></script>
+
 </body>
 </html>
+
+

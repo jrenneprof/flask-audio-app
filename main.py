@@ -1,14 +1,16 @@
 print("Starting Flask app...")
 
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, url_for, send_file, send_from_directory, flash
-from werkzeug.utils import secure_filename
+from flask import Flask, render_template, request, send_file, send_from_directory, jsonify, flash, redirect
 import os
-from google.cloud import speech, texttospeech_v1
+from google.cloud import speech, texttospeech_v1, language_v1, storage
 
 app = Flask(__name__)
 
-# Configure upload and TTS folders
+# Google Cloud Storage Bucket Name
+GCS_BUCKET_NAME = "classbucketassigment2"
+
+# Configure folders (local for testing, Cloud Storage for production)
 UPLOAD_FOLDER = 'uploads'
 TTS_FOLDER = 'tts'
 ALLOWED_EXTENSIONS = {'wav'}
@@ -21,70 +23,100 @@ os.makedirs(TTS_FOLDER, exist_ok=True)
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def get_files(folder):
-    files = []
-    for filename in os.listdir(folder):
-        if allowed_file(filename):
-            files.append(filename)
-    files.sort(reverse=True)
-    return files
+# Upload file to Google Cloud Storage
+def upload_to_storage(bucket_name, source_file, destination_blob):
+    """Uploads a file to GCS and returns the public URL"""
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(destination_blob)
+    blob.upload_from_filename(source_file)
+    return f"https://storage.googleapis.com/{bucket_name}/{destination_blob}"
 
 @app.route('/')
 def index():
-    audio_files = get_files(app.config['UPLOAD_FOLDER'])
-    tts_files = get_files(app.config['TTS_FOLDER'])
+    audio_files = sorted(os.listdir(UPLOAD_FOLDER), reverse=True)
+    tts_files = sorted(os.listdir(TTS_FOLDER), reverse=True)
     return render_template('index.html', audio_files=audio_files, tts_files=tts_files)
 
+# Audio Upload Route (Speech-to-Text + Sentiment Analysis)
 @app.route('/upload', methods=['POST'])
 def upload_audio():
     if 'audio_data' not in request.files:
-        flash('No audio data')
-        return redirect(request.url)
+        return jsonify({"error": "No audio data received"}), 400
+
     file = request.files['audio_data']
     if file.filename == '':
-        flash('No selected file')
-        return redirect(request.url)
+        return jsonify({"error": "No file selected"}), 400
+
     if file and allowed_file(file.filename):
-        filename = datetime.now().strftime("%Y%m%d-%I%M%S%p") + '.wav'
+        filename = datetime.now().strftime("%Y%m%d-%H%M%S") + '.wav'
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(file_path)
 
-        # Call Speech-to-Text API
-        with open(file_path, 'rb') as audio_file:
-            audio_data = audio_file.read()
+        # Convert Speech to Text
+        try:
+            with open(file_path, 'rb') as audio_file:
+                audio_data = audio_file.read()
+            transcript = speech_to_text(audio_data)
+        except Exception as e:
+            return jsonify({"error": f"Speech-to-text failed: {str(e)}"}), 500
 
-        transcript = speech_to_text(audio_data)
+        # Perform Sentiment Analysis
+        sentiment_score, sentiment_magnitude = analyze_sentiment(transcript)
 
-        # Save transcript as a .txt file
+        # Determine Sentiment Label
+        sentiment_label = "NEUTRAL"
+        if sentiment_score > 0.25:
+            sentiment_label = "POSITIVE"
+        elif sentiment_score < -0.25:
+            sentiment_label = "NEGATIVE"
+
+        # Save Transcript & Sentiment Analysis
         transcript_path = file_path + '.txt'
+        transcript_content = f"Transcription:\n{transcript}\nSentiment: {sentiment_label} (Score: {sentiment_score}, Magnitude: {sentiment_magnitude})"
+        
         with open(transcript_path, 'w') as f:
-            f.write(transcript)
+            f.write(transcript_content)
 
-    return redirect('/')
+        # Upload to Cloud Storage
+        audio_url = upload_to_storage(GCS_BUCKET_NAME, file_path, f"uploads/{filename}")
+        upload_to_storage(GCS_BUCKET_NAME, transcript_path, f"uploads/{filename}.txt")
 
+        return jsonify({
+            "transcript": transcript,
+            "sentiment_label": sentiment_label,
+            "sentiment_score": sentiment_score,
+            "sentiment_magnitude": sentiment_magnitude,
+            "audio_url": audio_url
+        })
+
+# Text-to-Speech (TTS) Route
 @app.route('/upload_text', methods=['POST'])
 def upload_text():
-    text = request.form['text']
-    if text:
-        filename = datetime.now().strftime("%Y%m%d-%I%M%S%p") + '.wav'
-        tts_path = os.path.join(app.config['TTS_FOLDER'], filename)
+    text = request.form.get('text', '').strip()
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
 
-        # Call Text-to-Speech API
+    filename = datetime.now().strftime("%Y%m%d-%H%M%S") + '.wav'
+    tts_path = os.path.join(app.config['TTS_FOLDER'], filename)
+
+    # Convert Text to Speech
+    try:
         audio_content = text_to_speech(text)
-
-        # Save the generated audio file
         with open(tts_path, 'wb') as f:
             f.write(audio_content)
+    except Exception as e:
+        return jsonify({"error": f"Text-to-Speech failed: {str(e)}"}), 500
 
-        # Save the input text for reference
-        with open(tts_path + '.txt', 'w') as f:
-            f.write(text)
+    # Save Text Input for Reference
+    with open(tts_path + '.txt', 'w') as f:
+        f.write(text)
 
-    return redirect('/')
+    # Upload to Cloud Storage
+    tts_url = upload_to_storage(GCS_BUCKET_NAME, tts_path, f"tts/{filename}")
+    upload_to_storage(GCS_BUCKET_NAME, tts_path + '.txt', f"tts/{filename}.txt")
 
-@app.route('/script.js', methods=['GET'])
-def scripts_js():
-    return send_file('./script.js')
+    return jsonify({"tts_url": tts_url})
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
@@ -96,44 +128,45 @@ def tts_file(filename):
 
 # Google Speech-to-Text Function
 def speech_to_text(audio_data):
+    """Convert speech to text using Google Speech-to-Text API"""
     client = speech.SpeechClient()
     audio = speech.RecognitionAudio(content=audio_data)
     config = speech.RecognitionConfig(
         language_code="en-US",
-        model="latest_long"
+        model="default"
     )
-
     response = client.recognize(config=config, audio=audio)
-    transcript = ''
-    for result in response.results:
-        transcript += result.alternatives[0].transcript + '\n'
-    return transcript
+    return " ".join(result.alternatives[0].transcript for result in response.results)
 
 # Google Text-to-Speech Function
 def text_to_speech(text):
-    try:
-        # Debugging: Print the GOOGLE_APPLICATION_CREDENTIALS environment variable
-        print("GOOGLE_APPLICATION_CREDENTIALS:", os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-        
-        client = texttospeech_v1.TextToSpeechClient()
-        input_data = texttospeech_v1.SynthesisInput(text=text)
-        voice = texttospeech_v1.VoiceSelectionParams(
-            language_code="en-US", 
-            ssml_gender=texttospeech_v1.SsmlVoiceGender.NEUTRAL
-        )
-        audio_config = texttospeech_v1.AudioConfig(audio_encoding=texttospeech_v1.AudioEncoding.LINEAR16)
+    """Convert text to speech using Google Text-to-Speech API"""
+    client = texttospeech_v1.TextToSpeechClient()
+    input_data = texttospeech_v1.SynthesisInput(text=text)
+    voice = texttospeech_v1.VoiceSelectionParams(
+        language_code="en-US", 
+        ssml_gender=texttospeech_v1.SsmlVoiceGender.NEUTRAL
+    )
+    audio_config = texttospeech_v1.AudioConfig(audio_encoding=texttospeech_v1.AudioEncoding.LINEAR16)
+    response = client.synthesize_speech(input=input_data, voice=voice, audio_config=audio_config)
+    return response.audio_content
 
-        response = client.synthesize_speech(
-            input=input_data,
-            voice=voice,
-            audio_config=audio_config
-        )
-        return response.audio_content
+# Google Sentiment Analysis Function
+def analyze_sentiment(text):
+    """Analyze sentiment using Google Natural Language API"""
+    client = language_v1.LanguageServiceClient()
+    document = language_v1.Document(content=text, type_=language_v1.Document.Type.PLAIN_TEXT)
+    response = client.analyze_sentiment(request={"document": document})
+    sentiment = response.document_sentiment
+    return sentiment.score, sentiment.magnitude
 
-    except Exception as e:
-        # Print the error for debugging
-        print("Error during Text-to-Speech API call:", e)
-        raise
+# Fix Missing `script.js` Route
+@app.route('/script.js')
+def scripts_js():
+    return send_file(os.path.join(os.getcwd(), "script.js"))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=True)
+
+
+
